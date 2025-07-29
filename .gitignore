@@ -1,0 +1,3 @@
+.DS_Store
+assembled_roms/*.bin
+assembled_roms/*.hex
