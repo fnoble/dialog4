@@ -37,7 +37,7 @@ from typing import Sequence
 from PIL import Image, ImageDraw, ImageFont  # pip install pillow
 
 DEFAULT_COLS = 16
-LABELLED_LIMIT = 256
+PAGE_SIZE = 256
 GRID_THICKNESS = 1
 
 
@@ -58,13 +58,17 @@ def render_plain(rom_bytes: bytes, char_width: int, char_height: int, cols: int)
     return img
 
 
-def render_labelled(rom_bytes: bytes, char_width: int, char_height: int) -> Image.Image:
+def render_labelled(rom_bytes: bytes, char_width: int, char_height: int, page: int = 0) -> Image.Image:
     """Render first 256 glyphs into a 16×16 grid with hex nibble headers."""
     cols = rows = 16
     bytes_per_char = char_height
-    needed = LABELLED_LIMIT * bytes_per_char
+    needed = (PAGE_SIZE * bytes_per_char) * (page + 1)
     if len(rom_bytes) < needed:
         raise ValueError("ROM too small for 256 glyphs – need at least {} bytes.".format(needed))
+
+    page = rom_bytes[page * PAGE_SIZE * bytes_per_char : (page + 1) * PAGE_SIZE * bytes_per_char]
+    if len(page) < PAGE_SIZE * bytes_per_char:
+        raise ValueError("Error, page too small")
 
     grid = GRID_THICKNESS
     cell_w = char_width + grid
@@ -86,8 +90,8 @@ def render_labelled(rom_bytes: bytes, char_width: int, char_height: int) -> Imag
         y_center = (row + 1) * cell_h + char_height // 2
         _center_text(draw, grid + char_width // 2, y_center, f"{row:X}", font)
 
-    for idx in range(LABELLED_LIMIT):
-        glyph = rom_bytes[idx * bytes_per_char : (idx + 1) * bytes_per_char]
+    for idx in range(PAGE_SIZE):
+        glyph = page[idx * bytes_per_char : (idx + 1) * bytes_per_char]
         cx = (idx % cols + 1) * cell_w + grid
         cy = (idx // cols + 1) * cell_h + grid
         _blit_glyph(img, glyph, cx, cy, char_width, char_height)
@@ -125,11 +129,10 @@ def _draw_grid(draw: ImageDraw.ImageDraw, w: int, h: int, cw: int, ch: int, cols
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Render MC6845 font ROMs to PNG.")
     parser.add_argument("rom", type=Path, help="Path to raw ROM binary dump")
-    parser.add_argument("png", type=Path, help="Output PNG path")
+    parser.add_argument("--prefix", type=str, default="", help="Output PNG prefix")
     parser.add_argument("--width", type=int, default=8, help="Glyph width (px)")
     parser.add_argument("--height", type=int, default=8, help="Glyph height (px)")
     parser.add_argument("--cols", type=int, default=DEFAULT_COLS, help="Glyphs per row in plain mode")
-    parser.add_argument("--labelled-grid", action="store_true", help="Generate 16×16 sheet with hex headers")
 
     args = parser.parse_args(argv)
 
@@ -137,13 +140,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     if len(data) % args.height != 0:
         raise ValueError("ROM size ({} bytes) is not a multiple of char height ({}).".format(len(data), args.height))
 
-    if args.labelled_grid:
-        img = render_labelled(data, args.width, args.height)
-    else:
-        img = render_plain(data, args.width, args.height, args.cols)
-
-    img.save(args.png)
-    print(f"Saved {args.png} ({img.width}×{img.height})")
+    prefix = args.prefix + "_" if args.prefix else ""
+    bytes_per_char = args.height
+    img = render_plain(data, args.width, args.height, args.cols)
+    filename = prefix+"all.png"
+    img.save(filename)
+    print(f"Saved {filename} ({img.width}×{img.height})")
+    
+    pages = int(len(data) / (PAGE_SIZE * bytes_per_char))
+    for page in range(pages):
+        img = render_labelled(data, args.width, args.height, page=page)
+        filename = prefix+f"page{page}.png"
+        img.save(filename)
+        print(f"Saved {filename} ({img.width}×{img.height})")
 
 
 if __name__ == "__main__":
