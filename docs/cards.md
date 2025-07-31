@@ -10,13 +10,6 @@
 | NSP55 | RAM card                   |                      |
 | NEP52 | EPROM card                 |                      |
 
-## Memory Map
-
-38000 <- Video RAM base address (Page 1?)
-38800 <- Video RAM base address (Page 2?)
-39001 <- MC6845 register number?
-39003 <- MC6845 register value?
-
 ## Connectors
 
 ### K10
@@ -129,5 +122,5 @@ DIN 41612
 | 28  | S1 (? 6800 mode?)     |
 | 29  | S2 (? 6800 mode?)     |
 | 30  | /M RESET (?)          |
-| 31  | ??                    |
+| 31  | ?? Output from NCR MC6845 - SYNCV?                   |
 | 32  | +5V                   |
