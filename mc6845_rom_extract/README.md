@@ -1,5 +1,8 @@
 # MC6845 Video ROM Glyph Extraction
 
+<p align="center">
+  <img src="/mc6845_rom_extract/page0.png" />
+</p>
 Extracts the glyphs from a binary video ROM image for the MC6845. Saves the glyphs to a `.png` file.
 
 ## Usage
