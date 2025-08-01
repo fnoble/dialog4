@@ -95,10 +95,8 @@
 - **Character code: **D0-D7 → ROM A4-A11
 - **Font bank:** D8-D9 → ROM A12-A13
 - **Reverse video:** D15 → XOR with glyph & CURSOR
+    - From firmware I can see reversed text has high byte 0x80 -> confirms D15 is reverse video!
 - MC6845 RA0-RA3 → ROM A0-A3 (select scan-line within glyph)
 - MC6845 CURSOR (pin 19) → same XOR for block cursor
 - D10 is routed somewhere but label unreadable - may be N/C or ?
 - D14-11 are N/C
-
-
-

@@ -77,7 +77,9 @@
 | A23-A8                | A5-7    | A1-4         | A0   |
 | --------------------- | ------- | ------------ | ---- |
 | Solder Jumpers        | IC28 Y0 | -> UART A1-4 |      |
-| 0b0001 1111 1111 1111 | 0b000   | 0bXXXX       | 0b0? |
-| 0x1FFF                | 0x0     | 0xX          | 0x0? |
+| 0b1110 0000 0000 0000 | 0b000   | 0bXXXX       | 0b0? |
+| 0xE000                | 0x0     | 0xX          | 0x0? |
 
-Address is 0x1FFFXX
+Address is 0xE000XX
+Range is 0xE00000 - 0xE0001F
+Confirmed in the firmware
