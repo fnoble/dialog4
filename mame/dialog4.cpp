@@ -3,6 +3,7 @@
 #include "video/mc6845.h"
 #include "machine/68230pit.h"
 #include "machine/mc68681.h"
+#include "machine/nvram.h"
 #include "bus/rs232/rs232.h"
 #include "screen.h"
 
@@ -18,12 +19,15 @@ public:
           m_duart(*this, "duart"),
           m_vram(*this, "vram"),
           m_fontrom(*this, "fontrom"),
-          m_mode(*this, "MODE")
+          m_mode(*this, "MODE"),
+          m_kbd_cols(*this, "KCOL%u", 0U),
+          m_nvram(*this, "nspram")
     { }
 
     void dialog4(machine_config &config);
     INPUT_CHANGED_MEMBER(inject_a);
     INPUT_CHANGED_MEMBER(mode_changed);
+    INPUT_CHANGED_MEMBER(keypress);
 
 private:
     virtual void machine_start() override;
@@ -39,6 +43,9 @@ private:
     required_shared_ptr<u16>            m_vram;
     required_region_ptr<u8>             m_fontrom;
     required_ioport                     m_mode;
+    required_ioport_array<6>            m_kbd_cols;
+    required_device<nvram_device>       m_nvram;
+    u8                                  m_kbd_col_sel = 0xFF;
     
     MC6845_UPDATE_ROW(crtc_update_row);
     void duart_out_w(u8 data);
@@ -51,6 +58,11 @@ private:
     void pit1_w(offs_t offset, u16 data, u16 mem_mask = 0xffff);
     void pit1_check_data_available();
 
+    u16 pit0_r(offs_t offset, u16 mem_mask = 0xffff);
+    void pit0_w(offs_t offset, u16 data, u16 mem_mask = 0xffff);
+    void pit0_pb_w(u8 data);
+    u8 pit0_pa_r();
+
     void cpu_int(address_map &map);
 
 };
@@ -59,18 +71,19 @@ private:
 void dialog4_state::prg_map(address_map &map)
 {
     map(0x000000, 0x000007).rom().region("npp55rom", 0);    // Boot ROM (NPP55)
-    map(0x000008, 0x00ffff).ram();                          // On-board RAM (NPP55)
-    map(0x0a00000,0x0a9ffff).rom().region("nep52rom", 0);   // Main ROM (NEP52)
-    map(0x038000, 0x038fff).ram().share("vram");            // Video RAM (NCR53)
-    map(0x080000, 0x09ffff).ram();                          // RAM
-    map(0x0D0000, 0x0Dffff).ram();                          // Main RAM (NSI56)
+    map(0x000008, 0x00FFFF).ram();                          // On-board RAM (NPP55)
+    map(0x0A00000,0x0A9FFFF).rom().region("nep52rom", 0);   // Main ROM (NEP52)
+    map(0x038000, 0x038FFF).ram().share("vram");            // Video RAM (NCR53)
+    map(0x080000, 0x09FFFF).ram();                          // RAM
+    map(0xD00000, 0xDFFFFF).ram().share("nspram");          // Main RAM (NSP56)
 
     /* MC6845: odd‑byte address= $39001 (addr) , $39003 (data) */
     map(0x0039000, 0x0039001).w("crtc", FUNC(mc6845_device::address_w));
     map(0x0039002, 0x0039003).w("crtc", FUNC(mc6845_device::register_w));
 
     // three PIAs on a 1 kB boundary, 16-bit bus, 2-byte register spacing
-    map(0x012000, 0x01203F).mirror(0x0003E0).rw("pit0", FUNC(pit68230_device::read), FUNC(pit68230_device::write));
+    //map(0x012000, 0x01203F).mirror(0x0003E0).rw("pit0", FUNC(pit68230_device::read), FUNC(pit68230_device::write));
+    map(0x012000, 0x01203F).mirror(0x0003E0).rw(FUNC(dialog4_state::pit0_r), FUNC(dialog4_state::pit0_w));
     //map(0x012400, 0x01241F).mirror(0x0003E0).rw("pit1", FUNC(pit68230_device::read), FUNC(pit68230_device::write));
     map(0x012400, 0x01243F).mirror(0x0003E0).rw(FUNC(dialog4_state::pit1_r), FUNC(dialog4_state::pit1_w));
     //map(0x012800, 0x01281F).mirror(0x0003E0).rw("pia2", FUNC(pit68230_device::read), FUNC(pit68230_device::write));
@@ -82,10 +95,10 @@ void dialog4_state::prg_map(address_map &map)
 void dialog4_state::cpu_int(address_map &map)
 {
 	map(0xff'fff3, 0xff'fff3).lr8(NAME([]() { return m68000_base_device::autovector(1); }));
-	map(0xff'fff5, 0xff'fff5).lr8(NAME([]() { return m68000_base_device::autovector(2); }));
+	map(0xff'fff5, 0xff'fff5).lr8(NAME([]() { return 0x47; })); // PIT0 H4 (keypad)
 	map(0xff'fff7, 0xff'fff7).lr8(NAME([]() { return m68000_base_device::autovector(3); }));
 	map(0xff'fff9, 0xff'fff9).lr8(NAME([]() { return m68000_base_device::autovector(4); }));
-	map(0xff'fffb, 0xff'fffb).lr8(NAME([]() { return 0x40; }));
+	map(0xff'fffb, 0xff'fffb).lr8(NAME([]() { return 0x40; })); // PIT1 port
 	map(0xff'fffd, 0xff'fffd).lr8(NAME([]() { return m68000_base_device::autovector(6); }));
 	map(0xff'ffff, 0xff'ffff).lr8(NAME([]() { return m68000_base_device::autovector(7); }));
 }
@@ -96,6 +109,8 @@ void dialog4_state::dialog4(machine_config &config)
     M68000(config, m_maincpu, 8_MHz_XTAL);           // CPU
     m_maincpu->set_addrmap(AS_PROGRAM, &dialog4_state::prg_map);
     m_maincpu->set_addrmap(m68000_base_device::AS_CPU_SPACE, &dialog4_state::cpu_int);
+
+    NVRAM(config, "nspram", nvram_device::DEFAULT_ALL_0);
 
     MC6845(config, m_crtc, 8_MHz_XTAL/8);            // char‑clock
     screen_device &screen(SCREEN(config, "screen", SCREEN_TYPE_RASTER));
@@ -119,8 +134,9 @@ void dialog4_state::dialog4(machine_config &config)
 
     //m_pit0->port_irq_callback().set_inputline("maincpu", 2);   // Port-A/B/C
     //m_pit0->timer_irq_callback().set_inputline("maincpu", 2);  // 16-bit timer
+    m_pit0->pb_out_callback().set(FUNC(dialog4_state::pit0_pb_w));
+    m_pit0->pa_in_callback().set(FUNC(dialog4_state::pit0_pa_r));
 
-    //m_pit1->port_irq_callback().set(FUNC(dialog4_state::pit1_port_irq));
     //m_pit1->timer_irq_callback().set_inputline("maincpu", 3);
     m_pit1->pb_out_callback().set(FUNC(dialog4_state::pit1_pb_out));  // CPU -> MC bytes
     m_pit1->pa_in_callback().set(FUNC(dialog4_state::pit1_pa_in));    // MC -> CPU bytes on demand
@@ -149,6 +165,7 @@ void dialog4_state::dialog4(machine_config &config)
 
 void dialog4_state::machine_start()
 {
+    subdevice<nvram_device>("nspram")->set_base(memshare("nspram")->ptr(), memshare("nspram")->bytes());
 }
 
 void dialog4_state::machine_reset()
@@ -184,6 +201,58 @@ static inline bool lo_byte(u16 mem_mask) { return (mem_mask & 0x00FF) == 0x00FF;
 static inline u8   hi(u16 w)             { return u8(w >> 8); }
 static inline u8   lo(u16 w)             { return u8(w & 0xFF); }
 
+u16 dialog4_state::pit0_r(offs_t offset, u16 mem_mask)
+{
+	u16 data = m_pit0->read(offset);
+
+	const u32 byte_addr = 0x012000 + (offset << 1);
+
+	if (hi_byte(mem_mask))
+		logerror("PIT0 R %02X %s @%06X.even -> %02X (mask=%04X)\n", offset, regname(offset), byte_addr, hi(data), mem_mask);
+	if (lo_byte(mem_mask))
+		logerror("PIT0 R %02X %s?@%06X.odd  -> %02X (mask=%04X)\n", offset, regname(offset), byte_addr+1, lo(data), mem_mask);
+
+	return data;
+}
+
+void dialog4_state::pit0_w(offs_t offset, u16 data, u16 mem_mask)
+{
+	const u32 byte_addr = 0x012000 + (offset << 1);
+
+	if (hi_byte(mem_mask)) {
+		logerror("PIT0 W %02X %s @%06X.even <= %02X (mask=%04X)\n", offset, regname(offset), byte_addr, hi(data), mem_mask);
+	    m_pit0->write(offset, hi(data));
+    }
+	if (lo_byte(mem_mask)) {
+		logerror("PIT0 W %02X %s?@%06X.odd  <= %02X (mask=%04X)\n", offset, regname(offset), byte_addr+1, lo(data), mem_mask);
+	    m_pit0->write(offset, lo(data));
+    }
+}
+
+void dialog4_state::pit0_pb_w(u8 data)
+{
+    m_kbd_col_sel = data;
+}
+
+u8 dialog4_state::pit0_pa_r()
+{
+    u8 rows = 0xFF;
+    u8 all_rows = 0xFF;
+
+    for (int col = 0; col < 6; ++col) {
+        all_rows &= m_kbd_cols[col]->read();
+        if ((m_kbd_col_sel & (1 << col)) == 0) {
+            rows &= m_kbd_cols[col]->read();
+        }
+    }
+
+    if (all_rows != 0xFF) {
+        logerror("Held\n");
+        m_maincpu->set_input_line(M68K_IRQ_2, HOLD_LINE);
+    }
+    return rows; // return active-low bits as seen on Port A pins
+}
+
 u16 dialog4_state::pit1_r(offs_t offset, u16 mem_mask)
 {
 	u16 data = m_pit1->read(offset);
@@ -210,7 +279,6 @@ void dialog4_state::pit1_w(offs_t offset, u16 data, u16 mem_mask)
 		logerror("PIT1 W %02X %s?@%06X.odd  <= %02X (mask=%04X)\n", offset, regname(offset), byte_addr+1, lo(data), mem_mask);
 	    m_pit1->write(offset, lo(data));
     }
-
 }
 
 void dialog4_state::pit1_pb_out(u8 data)
@@ -272,16 +340,131 @@ static INPUT_PORTS_START( dialog4 )
     PORT_START("INJECT")
     PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER)
         PORT_NAME("Inject byte 'A'")
-        PORT_CODE(KEYCODE_A)
         PORT_IMPULSE(1)
         PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::inject_a), 0)
     PORT_START("MODE")
     PORT_CONFNAME(0x1F, 0x00, "Mode")
         PORT_CONFSETTING(0x00, "None")
         PORT_CONFSETTING(0x01, "Manual")
-        PORT_CONFSETTING(0x02, "Zero")
+        PORT_CONFSETTING(0x02, "Set Zero")
+        PORT_CONFSETTING(0x03, "Reference")
+        PORT_CONFSETTING(0x04, "Incremental")
+        PORT_CONFSETTING(0x05, "Jog")
+        PORT_CONFSETTING(0x06, "Continuous")
+        PORT_CONFSETTING(0x07, "Manual Input")
+        PORT_CONFSETTING(0x08, "Program Blockwise")
+        PORT_CONFSETTING(0x09, "Program Auto")
+        PORT_CONFSETTING(0x0a, "Tool Comp")
+        PORT_CONFSETTING(0x0b, "Program Input")
+        PORT_CONFSETTING(0x0c, "Parameters")
+        PORT_CONFSETTING(0x0d, "Program Mgmt")
+        PORT_CONFSETTING(0x0e, "Proogram IO")
+        PORT_CONFSETTING(0x0f, "DNC")
         PORT_CONFSETTING(0x10, "Setup")
         PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::mode_changed), 0)
+    PORT_START("KCOL0")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("%") PORT_CODE(KEYCODE_EQUALS)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("N") PORT_CODE(KEYCODE_N)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("L") PORT_CODE(KEYCODE_L)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("FKT") PORT_CODE(KEYCODE_LSHIFT)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("?") PORT_CODE(KEYCODE_SLASH)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("LEFT") PORT_CODE(KEYCODE_LEFT)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("DOWN") PORT_CODE(KEYCODE_DOWN)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("CLEAR") PORT_CODE(KEYCODE_BACKSPACE)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+    PORT_START("KCOL1")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("D") PORT_CODE(KEYCODE_D)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("H") PORT_CODE(KEYCODE_H)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Q") PORT_CODE(KEYCODE_Q)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("V") PORT_CODE(KEYCODE_V)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("INFO") PORT_CODE(KEYCODE_LALT)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("RIGHT") PORT_CODE(KEYCODE_RIGHT)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("UP") PORT_CODE(KEYCODE_UP)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("ACK") PORT_CODE(KEYCODE_SPACE)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+    PORT_START("KCOL2")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("F") PORT_CODE(KEYCODE_F)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("S") PORT_CODE(KEYCODE_S)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("M") PORT_CODE(KEYCODE_M)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("T") PORT_CODE(KEYCODE_T)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME(")") PORT_CODE(KEYCODE_CLOSEBRACE)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("<") PORT_CODE(KEYCODE_COMMA)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("*") PORT_CODE(KEYCODE_ASTERISK)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("+/-") PORT_CODE(KEYCODE_MINUS) PORT_CHAR('-')
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+    PORT_START("KCOL3")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("G") PORT_CODE(KEYCODE_G)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("A") PORT_CODE(KEYCODE_A)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("W") PORT_CODE(KEYCODE_W)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("P") PORT_CODE(KEYCODE_P)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("7") PORT_CODE(KEYCODE_7)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("4") PORT_CODE(KEYCODE_4)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("1") PORT_CODE(KEYCODE_1)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("=/.") PORT_CODE(KEYCODE_STOP) PORT_CHAR('.')
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+    PORT_START("KCOL4")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("I") PORT_CODE(KEYCODE_I)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("J") PORT_CODE(KEYCODE_J)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("K") PORT_CODE(KEYCODE_K)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("R") PORT_CODE(KEYCODE_R)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("8") PORT_CODE(KEYCODE_8)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("5") PORT_CODE(KEYCODE_5)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("2") PORT_CODE(KEYCODE_2)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("0") PORT_CODE(KEYCODE_0) PORT_CHAR('0')
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+    PORT_START("KCOL5")
+        PORT_BIT(0x01, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("X") PORT_CODE(KEYCODE_X)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Y") PORT_CODE(KEYCODE_Y)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Z") PORT_CODE(KEYCODE_Z)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("C") PORT_CODE(KEYCODE_C)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("9") PORT_CODE(KEYCODE_9)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("6") PORT_CODE(KEYCODE_6)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("3") PORT_CODE(KEYCODE_3)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+        PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("TRANSFER") PORT_CODE(KEYCODE_ENTER)
+            PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(dialog4_state::keypress), 0)
+
 INPUT_PORTS_END
 
 void dialog4_state::pit1_check_data_available()
@@ -297,9 +480,14 @@ INPUT_CHANGED_MEMBER(dialog4_state::inject_a)
 {
     if (!newval) return;
 
-    m_zp_to_cpu.push_back(0xcc);
-    m_zp_to_cpu.push_back(0x10);
-    pit1_check_data_available();
+    //m_maincpu->set_input_line(M68K_IRQ_2, HOLD_LINE);
+    
+}
+
+INPUT_CHANGED_MEMBER(dialog4_state::keypress)
+{
+    logerror("Keypress\n");
+    m_maincpu->set_input_line(M68K_IRQ_2, HOLD_LINE);
 }
 
 INPUT_CHANGED_MEMBER(dialog4_state::mode_changed)
@@ -317,7 +505,8 @@ ROM_START(dialog4)
     ROM_LOAD("353.21_NPP55_2.14.bin", 0x0000, 0x20000, CRC(ff48390b) SHA1(0)) // fill in CRC later
 
     ROM_REGION16_BE(0xa0000, "nep52rom", 0)
-    ROM_LOAD("353.32_NEP52_2.16.bin", 0x00000, 0xa0000, CRC(d91e2d75) SHA1(0))
+    ROM_LOAD("353.32_NEP52_2.16.bin.incN.bin", 0x00000, 0xa0000, CRC(ae2cc644) SHA1(0))
+    //ROM_LOAD("353.32_NEP52_2.16.bin", 0x00000, 0xa0000, CRC(d91e2d75) SHA1(0))
 
     ROM_REGION(0x8000, "fontrom", 0)
     ROM_LOAD("44206-352.00 NCR 53 IC 02 1.04.bin", 0x0000, 0x8000, CRC(6c4346be) SHA1(0))
